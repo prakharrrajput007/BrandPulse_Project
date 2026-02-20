@@ -1,1 +1,11 @@
 name: ecom-fetcher
+version: 0.0.1
+
+permissions:
+  - name: fetch
+    domains:
+      - hooks.slack.com
+
+scheduler:
+  jobs:
+    - name: scrapeAndForward

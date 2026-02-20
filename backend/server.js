@@ -4,73 +4,104 @@ const { MongoClient } = require("mongodb");
 const cors = require("cors");
 
 const app = express();
-
-// Middleware
 app.use(cors());
 app.use(express.json());
 
 const client = new MongoClient(process.env.MONGO_URI);
 let collection;
 
+// ─── SLACK CONFIG ─────────────────────────────────────────────
+const SLACK_BOT_TOKEN = 'xoxb-10581505344880-10553224889122-cGByQGamNYYNwDaugq7nQrQx';
+const SLACK_CHANNEL_ID = 'C0AG5QBB02Z';
+// ─────────────────────────────────────────────────────────────
+
 async function startServer() {
   try {
     await client.connect();
-
     const db = client.db("brandpulse");
     collection = db.collection("reddit_posts");
-
+    await collection.createIndex({ postId: 1 }, { unique: true });
     console.log("✅ MongoDB connected successfully");
 
-    // ⭐ ADDED — ensure unique index on postId (prevents duplicates forever)
-    await collection.createIndex({ postId: 1 }, { unique: true });
-
-    // Start listening only after DB connection is established
-    const PORT = process.env.PORT || 5000;
+    const PORT = process.env.PORT || 5050;
     app.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
+      console.log(`   Hit http://localhost:${PORT}/read-slack to pull Slack messages into Atlas`);
     });
-
   } catch (err) {
     console.error("❌ Failed to connect to MongoDB:", err);
     process.exit(1);
   }
 }
 
-/* ----------- HEALTH CHECK (OPTIONAL BUT USEFUL) ----------- */
-// ⭐ ADDED — helps verify ngrok works
 app.get("/", (req, res) => {
   res.send("Server running ✅");
 });
 
+app.get("/health", (req, res) => {
+  res.status(200).json({ status: "ok", timestamp: new Date().toISOString() });
+});
 
-/* ----------- STORE POSTS API ----------- */
-app.post("/store-posts", async (req, res) => {
+// ─── READ SLACK → SAVE TO ATLAS ──────────────────────────────
+// Hit this in browser: http://localhost:5050/read-slack
+// It reads all messages from #brandpulse_data and saves posts to Atlas
+app.get("/read-slack", async (req, res) => {
   try {
+    console.log("📨 Fetching messages from Slack...");
 
-    // ⭐ CHANGED — allow BOTH formats:
-    // 1) raw array
-    // 2) { posts: [...] }
-    const posts = Array.isArray(req.body) ? req.body : req.body.posts;
+    let allMessages = [];
+    let cursor = undefined;
 
-    if (!Array.isArray(posts) || posts.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "No posts received or invalid format"
+    // Slack paginates messages — loop until all are fetched
+    do {
+      const url = new URL('https://slack.com/api/conversations.history');
+      url.searchParams.set('channel', SLACK_CHANNEL_ID);
+      url.searchParams.set('limit', '200');
+      if (cursor) url.searchParams.set('cursor', cursor);
+
+      const response = await fetch(url.toString(), {
+        headers: {
+          'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
       });
+
+      const data = await response.json();
+
+      if (!data.ok) {
+        console.error("❌ Slack API error:", data.error);
+        return res.status(500).json({ success: false, error: data.error });
+      }
+
+      allMessages = allMessages.concat(data.messages || []);
+      cursor = data.response_metadata?.next_cursor;
+
+    } while (cursor);
+
+    console.log(`📦 Total Slack messages fetched: ${allMessages.length}`);
+
+    // Parse posts from each message
+    const allPosts = [];
+    for (const msg of allMessages) {
+      if (!msg.text) continue;
+      try {
+        const parsed = JSON.parse(msg.text);
+        if (Array.isArray(parsed)) {
+          allPosts.push(...parsed.filter(p => p.postId));
+        }
+      } catch (e) {
+        // Not a JSON message, skip (e.g. "Hello World" test message)
+      }
     }
 
-    // ⭐ ADDED — remove invalid posts safely
-    const cleanPosts = posts.filter(p => p.postId);
+    console.log(`✅ Valid posts parsed: ${allPosts.length}`);
 
-    if (cleanPosts.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Posts missing postId"
-      });
+    if (allPosts.length === 0) {
+      return res.status(200).json({ success: true, message: "No valid posts found in Slack messages" });
     }
 
-    // Bulk upsert operations
-    const ops = cleanPosts.map(p => ({
+    // Upsert all posts into Atlas
+    const ops = allPosts.map(p => ({
       updateOne: {
         filter: { postId: p.postId },
         update: { $set: p },
@@ -79,32 +110,49 @@ app.post("/store-posts", async (req, res) => {
     }));
 
     const result = await collection.bulkWrite(ops);
-
-    console.log(`Stored ${cleanPosts.length} posts`);
+    console.log(`✅ Atlas: Upserted ${result.upsertedCount} | Modified ${result.modifiedCount}`);
 
     res.status(200).json({
       success: true,
-      message: "Data processed",
+      slackMessages: allMessages.length,
+      postsFound: allPosts.length,
       upsertedCount: result.upsertedCount,
-      modifiedCount: result.modifiedCount
+      modifiedCount: result.modifiedCount,
     });
 
   } catch (err) {
-    console.error("Error during bulkWrite:", err);
-    res.status(500).json({
-      success: false,
-      error: "Error storing posts to database"
-    });
+    console.error("❌ Error:", err);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
+// ─── STORE POSTS (unchanged) ──────────────────────────────────
+app.post("/store-posts", async (req, res) => {
+  try {
+    const posts = Array.isArray(req.body) ? req.body : req.body.posts;
+    if (!Array.isArray(posts) || posts.length === 0) {
+      return res.status(400).json({ success: false, message: "No posts received or invalid format" });
+    }
+    const cleanPosts = posts.filter(p => p.postId);
+    if (cleanPosts.length === 0) {
+      return res.status(400).json({ success: false, message: "Posts missing postId" });
+    }
+    const ops = cleanPosts.map(p => ({
+      updateOne: { filter: { postId: p.postId }, update: { $set: p }, upsert: true }
+    }));
+    const result = await collection.bulkWrite(ops);
+    console.log(`✅ Stored ${cleanPosts.length} posts`);
+    res.status(200).json({ success: true, message: "Data processed", upsertedCount: result.upsertedCount, modifiedCount: result.modifiedCount });
+  } catch (err) {
+    console.error("Error during bulkWrite:", err);
+    res.status(500).json({ success: false, error: "Error storing posts to database" });
+  }
+});
 
-/* ----------- GRACEFUL SHUTDOWN ----------- */
 process.on("SIGINT", async () => {
   await client.close();
   console.log("MongoDB connection closed. App exiting.");
   process.exit(0);
 });
 
-// Initialize the app
 startServer();
