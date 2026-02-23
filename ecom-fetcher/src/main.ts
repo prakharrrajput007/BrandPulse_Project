@@ -2,8 +2,10 @@ import { Devvit, type FormField, ScheduledJobEvent, TriggerContext } from "@devv
 import { handleNuke, handleNukePost } from "./nuke.js";
 
 // ─── CONFIG ───────────────────────────────────────────────────
-const SLACK_WEBHOOK_URL = 'https://hooks.slack.com/services/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'; // ← paste your new webhook here
 
+const SLACK_WEBHOOK_URL = 'https://hooks.slack.com/services/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';
+
+// Subreddits to scan
 const TARGET_SUBREDDITS = [
   'amazon',
   'amazonreviews',
@@ -17,7 +19,22 @@ const TARGET_SUBREDDITS = [
   'productreviews',
 ];
 
+// 🔍 Keywords to search inside posts
+const KEYWORDS = [
+  'delivery',
+  'refund',
+  'late',
+  'scam',
+  'quality',
+  'broken',
+  'replacement',
+  'return',
+  'customer service',
+  'discount',
+];
+
 const POSTS_PER_SUBREDDIT = 25;
+
 // ─────────────────────────────────────────────────────────────
 
 Devvit.configure({
@@ -28,21 +45,25 @@ Devvit.configure({
 // ─── HELPER: Send posts to Slack in chunks ────────────────────
 async function sendToSlack(posts: object[]): Promise<void> {
   const chunkSize = 10;
+
   for (let i = 0; i < posts.length; i += chunkSize) {
     const chunk = posts.slice(i, i + chunkSize);
+
     try {
       const response = await fetch(SLACK_WEBHOOK_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: JSON.stringify(chunk) }),
+        body: JSON.stringify({ text: JSON.stringify(chunk, null, 2) }),
       });
+
       if (!response.ok) {
         console.error(`❌ Slack webhook failed: ${response.status}`);
       } else {
-        console.log(`✅ Sent chunk ${Math.floor(i / chunkSize) + 1} to Slack (${chunk.length} posts)`);
+        console.log(`✅ Sent chunk ${Math.floor(i / chunkSize) + 1}`);
       }
-      // Pause to avoid Slack rate limiting
-      await new Promise(r => setTimeout(r, 1000));
+
+      await new Promise(r => setTimeout(r, 1000)); // prevent rate limit
+
     } catch (err: any) {
       console.error(`❌ Slack send error: ${err.message}`);
     }
@@ -54,30 +75,40 @@ Devvit.addSchedulerJob({
   name: 'scrapeAndForward',
   onRun: async (_event: ScheduledJobEvent, context: TriggerContext) => {
     console.log('🚀 scrapeAndForward job started');
-    const allPosts: object[] = [];
+
+    const matchedPosts: object[] = [];
 
     for (const subredditName of TARGET_SUBREDDITS) {
       console.log(`📂 Fetching from r/${subredditName}`);
+
       try {
         const listing = await context.reddit.getHotPosts({
-          subredditName: subredditName,
+          subredditName,
           limit: POSTS_PER_SUBREDDIT,
         }).all();
 
-        console.log(`  ✅ Got ${listing.length} posts from r/${subredditName}`);
+        console.log(`  ✅ Got ${listing.length} posts`);
 
         for (const post of listing) {
-          allPosts.push({
-            postId: post.id,
-            title: post.title ?? '',
-            author: post.authorName ?? 'unknown',
-            subreddit: post.subredditName ?? subredditName,
-            body: post.body ?? '',
-            url: post.url ?? '',
-            score: post.score ?? 0,
-            numComments: post.numberOfComments ?? 0,
-            createdAt: Math.floor((post.createdAt?.getTime?.() ?? 0) / 1000),
-            keyword: subredditName,
+          const title = post.title ?? '';
+          const body = post.body ?? '';
+          const combinedText = (title + ' ' + body).toLowerCase();
+
+          const matchedKeyword = KEYWORDS.find(keyword =>
+            combinedText.includes(keyword.toLowerCase())
+          );
+
+          if (!matchedKeyword) continue;
+
+          matchedPosts.push({
+            Title: title,
+            Body: body,
+            CreatedDate: post.createdAt?.toISOString?.() ?? '',
+            Comments: post.numberOfComments ?? 0,
+            Upvotes: post.score ?? 0,
+            Subreddit: post.subredditName ?? subredditName,
+            PostID: post.id,
+            Keyword: matchedKeyword,
           });
         }
 
@@ -88,25 +119,31 @@ Devvit.addSchedulerJob({
       }
     }
 
-    console.log(`📦 Total posts collected: ${allPosts.length}`);
+    console.log(`📦 Matched posts: ${matchedPosts.length}`);
 
-    if (allPosts.length === 0) {
-      console.log('⚠️ Nothing to send. Exiting.');
+    if (matchedPosts.length === 0) {
+      console.log('⚠️ No keyword matches found.');
       return;
     }
 
-    await sendToSlack(allPosts);
+    // Sort newest → oldest
+    matchedPosts.sort((a: any, b: any) =>
+      new Date(b.CreatedDate).getTime() - new Date(a.CreatedDate).getTime()
+    );
+
+    await sendToSlack(matchedPosts);
 
     console.log('🏁 Job complete.');
   },
 });
 
+// ─── SCHEDULE JOB ON INSTALL ──────────────────────────────────
 Devvit.addTrigger({
   event: 'AppInstall',
   onEvent: async (_event, context) => {
     await context.scheduler.runJob({
       name: 'scrapeAndForward',
-      cron: '0 * * * *',
+      cron: '0 * * * *', // every hour
     });
     console.log('⏰ Hourly scraper scheduled.');
   },
@@ -126,7 +163,7 @@ Devvit.addMenuItem({
   },
 });
 
-// ─── EXISTING COMMENT MOP LOGIC (unchanged) ──────────────────
+// ─── EXISTING COMMENT MOP LOGIC (UNCHANGED) ──────────────────
 const nukeFields: FormField[] = [
   { name: "remove", label: "Remove comments", type: "boolean", defaultValue: true },
   { name: "lock", label: "Lock comments", type: "boolean", defaultValue: false },
@@ -139,7 +176,6 @@ const nukeForm = Devvit.createForm(
     if (!values.lock && !values.remove) { context.ui.showToast("You must select either lock or remove."); return; }
     if (context.commentId) {
       const result = await handleNuke({ remove: values.remove, lock: values.lock, skipDistinguished: values.skipDistinguished, commentId: context.commentId, subredditId: context.subredditId }, context);
-      console.log(`Mop result - ${result.success ? "success" : "fail"} - ${result.message}`);
       context.ui.showToast(`${result.success ? "Success" : "Failed"} : ${result.message}`);
     } else {
       context.ui.showToast(`Mop failed! Please try again later.`);
@@ -147,7 +183,7 @@ const nukeForm = Devvit.createForm(
   }
 );
 
-Devvit.addMenuItem({ label: "Mop comments", description: "Remove this comment and all child comments. This might take a few seconds to run.", location: "comment", forUserType: "moderator", onPress: (_, context) => { context.ui.showForm(nukeForm); } });
+Devvit.addMenuItem({ label: "Mop comments", location: "comment", forUserType: "moderator", onPress: (_, context) => { context.ui.showForm(nukeForm); } });
 
 const nukePostForm = Devvit.createForm(
   () => ({ fields: nukeFields, title: "Mop Post Comments", acceptLabel: "Mop", cancelLabel: "Cancel" }),
@@ -155,11 +191,10 @@ const nukePostForm = Devvit.createForm(
     if (!values.lock && !values.remove) { context.ui.showToast("You must select either lock or remove."); return; }
     if (!context.postId) { throw new Error("No post ID"); }
     const result = await handleNukePost({ remove: values.remove, lock: values.lock, skipDistinguished: values.skipDistinguished, postId: context.postId, subredditId: context.subredditId }, context);
-    console.log(`Mop result - ${result.success ? "success" : "fail"} - ${result.message}`);
     context.ui.showToast(`${result.success ? "Success" : "Failed"} : ${result.message}`);
   }
 );
 
-Devvit.addMenuItem({ label: "Mop post comments", description: "Remove all comments of this post. This might take a few seconds to run.", location: "post", forUserType: "moderator", onPress: (_, context) => { context.ui.showForm(nukePostForm); } });
+Devvit.addMenuItem({ label: "Mop post comments", location: "post", forUserType: "moderator", onPress: (_, context) => { context.ui.showForm(nukePostForm); } });
 
 export default Devvit;
