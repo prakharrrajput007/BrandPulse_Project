@@ -5,33 +5,41 @@ import { handleNuke, handleNukePost } from "./nuke.js";
 
 const SLACK_WEBHOOK_URL = 'https://hooks.slack.com/services/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';
 
-// Subreddits to scan
-const TARGET_SUBREDDITS = [
-  'amazon',
-  'amazonreviews',
-  'AmazonFlexDrivers',
-  'Flipkart',
-  'india',
-  'onlineshopping',
-  'deals',
-  'frugalmalefashion',
-  'BuyItForLife',
-  'productreviews',
-];
+// 🟡 INFO: Redis key where dynamic config is stored
+const REDIS_CONFIG_KEY = 'scraper_config';
 
-// 🔍 Keywords to search inside posts
-const KEYWORDS = [
-  'delivery',
-  'refund',
-  'late',
-  'scam',
-  'quality',
-  'broken',
-  'replacement',
-  'return',
-  'customer service',
-  'discount',
-];
+// ═══════════════════════════════════════════════════════════════
+// 📋 DEFAULT CONFIG — used when no Redis override is set
+//    Use "⚙️ Update Scraper Config" menu to change dynamically
+// ═══════════════════════════════════════════════════════════════
+const DEFAULT_CONFIG = {
+  fromDate: '2025-03-01',
+  toDate: '2025-03-13',
+  subreddits: [
+    'amazon',
+    'amazonreviews',
+    'AmazonFlexDrivers',
+    'Flipkart',
+    'india',
+    'onlineshopping',
+    'deals',
+    'frugalmalefashion',
+    'BuyItForLife',
+    'productreviews',
+  ],
+  keywords: [
+    'delivery',
+    'refund',
+    'late',
+    'scam',
+    'quality',
+    'broken',
+    'replacement',
+    'return',
+    'customer service',
+    'discount',
+  ],
+};
 
 const POSTS_PER_SUBREDDIT = 25;
 
@@ -40,7 +48,36 @@ const POSTS_PER_SUBREDDIT = 25;
 Devvit.configure({
   redditAPI: true,
   http: true,
+  redis: true, // 🔴 ADDED: needed for Redis config storage
 });
+
+// ─── TYPES ────────────────────────────────────────────────────
+interface ScraperConfig {
+  fromDate: string;
+  toDate: string;
+  subreddits: string[];
+  keywords: string[];
+}
+
+// ─── REDIS: Load config (falls back to DEFAULT_CONFIG) ────────
+async function loadConfig(context: TriggerContext): Promise<ScraperConfig> {
+  try {
+    const stored = await context.redis.get(REDIS_CONFIG_KEY);
+    if (stored) {
+      console.log('📦 Using Redis config');
+      return JSON.parse(stored) as ScraperConfig;
+    }
+  } catch (err: any) {
+    console.error(`⚠️ Redis read failed, using defaults: ${err.message}`);
+  }
+  console.log('📦 Using default config');
+  return DEFAULT_CONFIG;
+}
+
+// ─── REDIS: Save config ───────────────────────────────────────
+async function saveConfig(config: ScraperConfig, context: TriggerContext): Promise<void> {
+  await context.redis.set(REDIS_CONFIG_KEY, JSON.stringify(config));
+}
 
 // ─── HELPER: Send posts to Slack in chunks ────────────────────
 async function sendToSlack(posts: object[]): Promise<void> {
@@ -62,7 +99,7 @@ async function sendToSlack(posts: object[]): Promise<void> {
         console.log(`✅ Sent chunk ${Math.floor(i / chunkSize) + 1}`);
       }
 
-      await new Promise(r => setTimeout(r, 1000)); // prevent rate limit
+      await new Promise(r => setTimeout(r, 1000));
 
     } catch (err: any) {
       console.error(`❌ Slack send error: ${err.message}`);
@@ -76,9 +113,25 @@ Devvit.addSchedulerJob({
   onRun: async (_event: ScheduledJobEvent, context: TriggerContext) => {
     console.log('🚀 scrapeAndForward job started');
 
+    // Load config — Redis override or defaults
+    const config = await loadConfig(context);
+    const { subreddits, keywords, fromDate, toDate } = config;
+
+    const startDate = new Date(fromDate);
+    const endDate = new Date(toDate);
+    endDate.setHours(23, 59, 59, 999);
+
+    if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+      console.error('❌ Invalid date range in config. Use YYYY-MM-DD format.');
+      return;
+    }
+
+    console.log(`📅 Date range: ${startDate.toDateString()} → ${endDate.toDateString()}`);
+    console.log(`📋 Subreddits: ${subreddits.length} | Keywords: ${keywords.length}`);
+
     const matchedPosts: object[] = [];
 
-    for (const subredditName of TARGET_SUBREDDITS) {
+    for (const subredditName of subreddits) {
       console.log(`📂 Fetching from r/${subredditName}`);
 
       try {
@@ -92,9 +145,13 @@ Devvit.addSchedulerJob({
         for (const post of listing) {
           const title = post.title ?? '';
           const body = post.body ?? '';
-          const combinedText = (title + ' ' + body).toLowerCase();
+          const createdAt: Date = post.createdAt ?? new Date(0);
 
-          const matchedKeyword = KEYWORDS.find(keyword =>
+          // Date range filter
+          if (createdAt < startDate || createdAt > endDate) continue;
+
+          const combinedText = (title + ' ' + body).toLowerCase();
+          const matchedKeyword = keywords.find(keyword =>
             combinedText.includes(keyword.toLowerCase())
           );
 
@@ -132,7 +189,6 @@ Devvit.addSchedulerJob({
     );
 
     await sendToSlack(matchedPosts);
-
     console.log('🏁 Job complete.');
   },
 });
@@ -160,6 +216,86 @@ Devvit.addMenuItem({
       runAt: new Date(Date.now() + 1000),
     });
     context.ui.showToast('✅ Scraper triggered! Check logs.');
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════
+// ⚙️  UPDATE CONFIG FORM — change dates/subreddits/keywords
+//     without redeploying
+// ═══════════════════════════════════════════════════════════════
+const updateConfigForm = Devvit.createForm(
+  () => ({
+    title: 'Update Scraper Config',
+    acceptLabel: 'Save Config',
+    cancelLabel: 'Cancel',
+    fields: [
+      {
+        name: 'fromDate',
+        label: 'From Date (YYYY-MM-DD)',
+        type: 'string',
+        defaultValue: DEFAULT_CONFIG.fromDate,
+      },
+      {
+        name: 'toDate',
+        label: 'To Date (YYYY-MM-DD)',
+        type: 'string',
+        defaultValue: DEFAULT_CONFIG.toDate,
+      },
+      {
+        name: 'subreddits',
+        label: 'Subreddits (comma separated)',
+        type: 'string',
+        defaultValue: DEFAULT_CONFIG.subreddits.join(','),
+      },
+      {
+        name: 'keywords',
+        label: 'Keywords (comma separated)',
+        type: 'string',
+        defaultValue: DEFAULT_CONFIG.keywords.join(','),
+      },
+    ] as FormField[],
+  }),
+  async ({ values }, context) => {
+    const fromDate = (values.fromDate as string)?.trim();
+    const toDate = (values.toDate as string)?.trim();
+    const subreddits = (values.subreddits as string)
+      .split(',').map((s: string) => s.trim()).filter(Boolean);
+    const keywords = (values.keywords as string)
+      .split(',').map((k: string) => k.trim()).filter(Boolean);
+
+    if (isNaN(new Date(fromDate).getTime()) || isNaN(new Date(toDate).getTime())) {
+      context.ui.showToast('❌ Invalid dates. Use YYYY-MM-DD format.');
+      return;
+    }
+    if (subreddits.length === 0) {
+      context.ui.showToast('❌ At least one subreddit is required.');
+      return;
+    }
+    if (keywords.length === 0) {
+      context.ui.showToast('❌ At least one keyword is required.');
+      return;
+    }
+
+    await saveConfig({ fromDate, toDate, subreddits, keywords }, context);
+    console.log(`✅ Config updated — ${fromDate} → ${toDate} | Subreddits: ${subreddits.length} | Keywords: ${keywords.length}`);
+    context.ui.showToast(`✅ Config saved! ${subreddits.length} subreddits, ${keywords.length} keywords, ${fromDate} → ${toDate}`);
+  }
+);
+
+Devvit.addMenuItem({
+  label: '⚙️ Update Scraper Config',
+  location: 'subreddit',
+  forUserType: 'moderator',
+  onPress: (_, context) => context.ui.showForm(updateConfigForm),
+});
+
+Devvit.addMenuItem({
+  label: '🔄 Reset Config to Defaults',
+  location: 'subreddit',
+  forUserType: 'moderator',
+  onPress: async (_, context) => {
+    await context.redis.del(REDIS_CONFIG_KEY);
+    context.ui.showToast('✅ Config reset to defaults.');
   },
 });
 
