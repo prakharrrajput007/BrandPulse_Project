@@ -9,3 +9,4 @@ permissions:
 scheduler:
   jobs:
     - name: scrapeAndForward
+    - name: dailyRestart
