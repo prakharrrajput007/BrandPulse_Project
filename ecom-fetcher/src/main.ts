@@ -14,6 +14,12 @@ const BATCH_SIZE = 5;
 // 🟡 INFO: Max posts fetched per subreddit per run
 const POSTS_PER_SUBREDDIT = 50;
 
+// 🟡 INFO: Slack max message size (safe buffer under 40,000 char limit)
+const SLACK_MAX_CHARS = 38000;
+
+// 🟡 INFO: Delay between Slack messages in ms (respects 1 msg/sec limit)
+const SLACK_SEND_DELAY_MS = 1100;
+
 // 🟡 INFO: Redis keys
 const REDIS_CONFIG_KEY = 'scraper_config';
 const REDIS_CURSOR_KEY = 'scraper_cursor';
@@ -42,8 +48,7 @@ const KEYWORDS = [
 ];
 
 // ═══════════════════════════════════════════════════════════════
-// 📋 DEFAULT CONFIG — used when no Redis override is set
-//    Only subreddits, ecomSites and dates are changeable via UI
+// 📋 DEFAULT CONFIG
 // ═══════════════════════════════════════════════════════════════
 
 function getDefaultDates(): { fromDate: string; toDate: string } {
@@ -175,35 +180,72 @@ async function cancelHourlyJob(context: TriggerContext): Promise<void> {
 
 // ═══════════════════════════════════════════════════════════════
 // 📮 SLACK HELPER
+//
+// 🔴 FIXED: Dynamic size-based chunking
+//    - Calculates how many complete posts fit within SLACK_MAX_CHARS
+//    - Posts NEVER break across messages
+//    - 1.1s delay between messages to respect Slack rate limit
 // ═══════════════════════════════════════════════════════════════
-async function sendToSlack(posts: MatchedPost[], batchInfo: string): Promise<void> {
+
+// Send a single chunk of posts to Slack
+async function sendChunk(chunk: MatchedPost[]): Promise<void> {
+  try {
+    const response = await fetch(SLACK_WEBHOOK_URL, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ text: JSON.stringify(chunk, null, 2) }),
+    });
+    if (!response.ok) {
+      console.error(`❌ Slack webhook failed: ${response.status}`);
+    } else {
+      console.log(`✅ Slack message sent (${chunk.length} posts)`);
+    }
+  } catch (err: any) {
+    console.error(`❌ Slack send error: ${err.message}`);
+  }
+}
+
+// Sleep helper
+const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
+
+// Main Slack sender — groups posts by size, never breaks a post mid-message
+async function sendToSlack(posts: MatchedPost[]): Promise<void> {
   if (posts.length === 0) return;
 
-  const chunkSize = 10;
-  for (let i = 0; i < posts.length; i += chunkSize) {
-    const chunk = posts.slice(i, i + chunkSize);
-    const payload = {
-      source:     'reddit_scraper',
-      batch:      batchInfo,
-      scraped_at: new Date().toISOString(),
-      post_count: chunk.length,
-      posts:      chunk,
-    };
-    try {
-      const response = await fetch(SLACK_WEBHOOK_URL, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ text: JSON.stringify(payload, null, 2) }),
-      });
-      if (!response.ok) {
-        console.error(`❌ Slack webhook failed: ${response.status}`);
-      } else {
-        console.log(`✅ Slack chunk ${Math.floor(i / chunkSize) + 1} sent (${chunk.length} posts)`);
-      }
-    } catch (err: any) {
-      console.error(`❌ Slack send error: ${err.message}`);
+  let currentChunk: MatchedPost[] = [];
+  let currentSize  = 0;
+  let messageCount = 0;
+
+  for (const post of posts) {
+    const postStr  = JSON.stringify(post);
+    const postSize = postStr.length;
+
+    // If adding this post would exceed limit AND chunk has posts → send current chunk first
+    if (currentSize + postSize > SLACK_MAX_CHARS && currentChunk.length > 0) {
+      await sendChunk(currentChunk);
+      messageCount++;
+      console.log(`  📨 Message ${messageCount} sent (${currentChunk.length} posts, ${currentSize} chars)`);
+
+      // Wait between messages to respect Slack rate limit
+      await sleep(SLACK_SEND_DELAY_MS);
+
+      // Start fresh chunk with current post
+      currentChunk = [];
+      currentSize  = 0;
     }
+
+    currentChunk.push(post);
+    currentSize += postSize;
   }
+
+  // Send any remaining posts
+  if (currentChunk.length > 0) {
+    await sendChunk(currentChunk);
+    messageCount++;
+    console.log(`  📨 Message ${messageCount} sent (${currentChunk.length} posts, ${currentSize} chars)`);
+  }
+
+  console.log(`📮 Slack done — ${messageCount} message(s) sent for ${posts.length} posts`);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -216,8 +258,6 @@ Devvit.addSchedulerJob({
 
     const config = await loadConfig(context);
     const { subreddits, ecomSites, fromDate, toDate } = config;
-
-    // Keywords always from hardcoded constant
     const keywords = KEYWORDS;
 
     const startDate = new Date(fromDate);
@@ -306,8 +346,7 @@ Devvit.addSchedulerJob({
       new Date(b.CreatedDate).getTime() - new Date(a.CreatedDate).getTime()
     );
 
-    const batchInfo = `subs[${batchStart}–${batchEnd - 1}] of ${totalSubs}`;
-    await sendToSlack(matchedPosts, batchInfo);
+    await sendToSlack(matchedPosts);
     console.log('🏁 Job complete.');
   },
 });
@@ -338,7 +377,7 @@ Devvit.addSchedulerJob({
   },
 });
 
-// ─── ON INSTALL (first time only) ────────────────────────────
+// ─── ON INSTALL ───────────────────────────────────────────────
 Devvit.addTrigger({
   event: 'AppInstall',
   onEvent: async (_event, context) => {
@@ -394,7 +433,7 @@ Devvit.addMenuItem({
 });
 
 // ═══════════════════════════════════════════════════════════════
-// ⚙️  FORM 1 — Update Dates & Ecom Sites (small form, always opens)
+// ⚙️  FORM 1 — Update Dates & Ecom Sites
 // ═══════════════════════════════════════════════════════════════
 const updateDatesForm = Devvit.createForm(
   () => {
