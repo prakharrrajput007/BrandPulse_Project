@@ -15,7 +15,7 @@ const BATCH_SIZE = 5;
 const POSTS_PER_SUBREDDIT = 50;
 
 // 🟡 INFO: Slack max message size (safe buffer under 40,000 char limit)
-const SLACK_MAX_CHARS = 38000;
+const SLACK_MAX_CHARS = 3000;
 
 // 🟡 INFO: Delay between Slack messages in ms (respects 1 msg/sec limit)
 const SLACK_SEND_DELAY_MS = 1100;
@@ -181,11 +181,16 @@ async function cancelHourlyJob(context: TriggerContext): Promise<void> {
 // ═══════════════════════════════════════════════════════════════
 // 📮 SLACK HELPER
 //
-// 🔴 FIXED: Dynamic size-based chunking
-//    - Calculates how many complete posts fit within SLACK_MAX_CHARS
+// 🔴 FIXED: Measure actual formatted JSON size per chunk
+//    - Uses JSON.stringify(testChunk, null, 2).length to get the
+//      REAL byte size Slack will receive (accounts for array
+//      brackets, commas, indentation added by pretty-print)
 //    - Posts NEVER break across messages
 //    - 1.1s delay between messages to respect Slack rate limit
 // ═══════════════════════════════════════════════════════════════
+
+// Sleep helper
+const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
 
 // Send a single chunk of posts to Slack
 async function sendChunk(chunk: MatchedPost[]): Promise<void> {
@@ -205,47 +210,55 @@ async function sendChunk(chunk: MatchedPost[]): Promise<void> {
   }
 }
 
-// Sleep helper
-const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
-
-// Main Slack sender — groups posts by size, never breaks a post mid-message
+// Main Slack sender — measures ACTUAL formatted output size per chunk,
+// never estimates from raw post strings. Posts never break mid-message.
+// Any single post whose JSON alone exceeds SLACK_MAX_CHARS is dropped entirely.
 async function sendToSlack(posts: MatchedPost[]): Promise<void> {
   if (posts.length === 0) return;
 
   let currentChunk: MatchedPost[] = [];
-  let currentSize  = 0;
   let messageCount = 0;
+  let skippedCount = 0;
 
   for (const post of posts) {
-    const postStr  = JSON.stringify(post);
-    const postSize = postStr.length;
+    // Drop any post that exceeds the limit on its own — don't send it at all
+    if (JSON.stringify([post], null, 2).length > SLACK_MAX_CHARS) {
+      console.log(`  🚫 Post ${post.PostID} skipped — exceeds ${SLACK_MAX_CHARS} chars on its own`);
+      skippedCount++;
+      continue;
+    }
 
-    // If adding this post would exceed limit AND chunk has posts → send current chunk first
-    if (currentSize + postSize > SLACK_MAX_CHARS && currentChunk.length > 0) {
+    const testChunk = [...currentChunk, post];
+    // Measure the ACTUAL formatted size that will be sent to Slack
+    // This accounts for array brackets, commas, and pretty-print indentation
+    const formattedSize = JSON.stringify(testChunk, null, 2).length;
+
+    if (formattedSize > SLACK_MAX_CHARS && currentChunk.length > 0) {
+      // Current chunk is full — send it before adding this post
+      const sentSize = JSON.stringify(currentChunk, null, 2).length;
       await sendChunk(currentChunk);
       messageCount++;
-      console.log(`  📨 Message ${messageCount} sent (${currentChunk.length} posts, ${currentSize} chars)`);
+      console.log(`  📨 Message ${messageCount} sent (${currentChunk.length} posts, ${sentSize} chars)`);
 
       // Wait between messages to respect Slack rate limit
       await sleep(SLACK_SEND_DELAY_MS);
 
-      // Start fresh chunk with current post
-      currentChunk = [];
-      currentSize  = 0;
+      // Start a fresh chunk with just this post
+      currentChunk = [post];
+    } else {
+      currentChunk = testChunk;
     }
-
-    currentChunk.push(post);
-    currentSize += postSize;
   }
 
   // Send any remaining posts
   if (currentChunk.length > 0) {
+    const sentSize = JSON.stringify(currentChunk, null, 2).length;
     await sendChunk(currentChunk);
     messageCount++;
-    console.log(`  📨 Message ${messageCount} sent (${currentChunk.length} posts, ${currentSize} chars)`);
+    console.log(`  📨 Message ${messageCount} sent (${currentChunk.length} posts, ${sentSize} chars)`);
   }
 
-  console.log(`📮 Slack done — ${messageCount} message(s) sent for ${posts.length} posts`);
+  console.log(`📮 Slack done — ${messageCount} message(s) sent for ${posts.length - skippedCount} posts (${skippedCount} skipped — too large)`);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -572,7 +585,7 @@ const nukePostForm = Devvit.createForm(
     if (!values.lock && !values.remove) { context.ui.showToast("You must select either lock or remove."); return; }
     if (!context.postId) { throw new Error("No post ID"); }
     const result = await handleNukePost({ remove: values.remove, lock: values.lock, skipDistinguished: values.skipDistinguished, postId: context.postId, subredditId: context.subredditId }, context);
-    context.ui.showToast(`${result.success ? "Success" : "Failed"} : ${result.message}`);
+    context.ui.showToast(`${result.success ? "Failed" : "Success"} : ${result.message}`);
   }
 );
 
