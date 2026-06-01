@@ -4,7 +4,8 @@ import contractions
 class Normalizer:
     """
     Stage 4: Normalization
-    Lowercases, expands contractions, converts price shorthands, and expands Indian slang.
+    Lowercases, expands contractions, removes commas from numbers, 
+    converts price shorthands, and expands Indian slang.
     """
     
     # Custom domain dictionary for Indian E-commerce slang
@@ -16,6 +17,12 @@ class Normalizer:
         "gc": "gift card",
         "upi": "unified payments interface"
     }
+
+    @classmethod
+    def strip_number_commas(cls, text: str) -> str:
+        # Removes commas that are surrounded by digits (e.g., "1,500" -> "1500" or "1,50,000" -> "150000")
+        # (?<=\d) looks behind for a digit, and (?=\d) looks ahead for a digit.
+        return re.sub(r'(?<=\d),(?=\d)', '', text)
 
     @classmethod
     def expand_price_shorthands(cls, text: str) -> str:
@@ -42,10 +49,13 @@ class Normalizer:
         # 2. Expand English contractions (e.g., "don't" -> "do not")
         text = contractions.fix(text)
         
-        # 3. Convert price shorthands (1k->1000, 1.5L->150000)
+        # 3. Strip commas specifically from explicitly typed numbers
+        text = cls.strip_number_commas(text)
+        
+        # 4. Convert price shorthands (1k->1000, 1.5L->150000)
         text = cls.expand_price_shorthands(text)
         
-        # 4. Expand Indian e-commerce slang using custom dictionary
+        # 5. Expand Indian e-commerce slang using custom dictionary
         words = text.split()
         expanded_words = [cls.SLANG_DICT.get(word, word) for word in words]
         
