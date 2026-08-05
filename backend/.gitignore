@@ -1,0 +1,13 @@
+# Node.js
+node_modules/
+npm-debug.log
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Secrets & Environment Variables
+.env
+.env.local
+.DS_Store

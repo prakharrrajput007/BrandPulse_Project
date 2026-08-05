@@ -2,6 +2,9 @@ require("dotenv").config();
 const express = require("express");
 const { MongoClient } = require("mongodb");
 const cors = require("cors");
+// 🚀 NEW IMPORTS FOR AUTOMATION
+const cron = require("node-cron");
+const axios = require("axios");
 
 const app = express();
 app.use(cors());
@@ -62,31 +65,18 @@ function normalizePost(post) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// ✅ VALIDATE BLOCK — a valid block must be:
-//    1. A proper JSON array
-//    2. Every element must be an object with a PostID field
-//    If any of these fail → discard the entire block
+// ✅ VALIDATE BLOCK 
 // ═══════════════════════════════════════════════════════════════
 function parseAndValidateBlock(text) {
-  // Step 1: Must parse as valid JSON
   let parsed;
   try {
     parsed = JSON.parse(text);
   } catch (e) {
-    return null; // Not valid JSON — discard
+    return null;
   }
+  if (!Array.isArray(parsed)) return null;
+  if (parsed.length === 0) return null;
 
-  // Step 2: Must be an array
-  if (!Array.isArray(parsed)) {
-    return null; // Not an array — discard
-  }
-
-  // Step 3: Must have at least one element
-  if (parsed.length === 0) {
-    return null; // Empty array — discard
-  }
-
-  // Step 4: Every element must be a non-null object with a PostID field
   for (const item of parsed) {
     if (
       typeof item !== 'object' ||
@@ -94,16 +84,14 @@ function parseAndValidateBlock(text) {
       Array.isArray(item) ||
       (!item.PostID && !item.postId)
     ) {
-      return null; // Any invalid element — discard the whole block
+      return null;
     }
   }
-
-  return parsed; // All checks passed
+  return parsed;
 }
 
 // ═══════════════════════════════════════════════════════════════
 // 📨 /read-slack — Fetches ALL Slack messages from last N days
-//                  and saves valid posts to Atlas
 // ═══════════════════════════════════════════════════════════════
 app.get("/read-slack", async (req, res) => {
   try {
@@ -113,7 +101,6 @@ app.get("/read-slack", async (req, res) => {
 
     console.log(`📨 Fetching Slack messages from last ${daysBack} day(s) (since ${fromDate})...`);
 
-    // ── Fetch ALL pages of Slack history ──
     let allMessages  = [];
     let cursor       = undefined;
     let pageCount    = 0;
@@ -162,7 +149,7 @@ app.get("/read-slack", async (req, res) => {
         console.log(`  📄 Page ${pageCount}: ${messages.length} messages (total so far: ${allMessages.length})`);
 
         cursor = data.response_metadata?.next_cursor || null;
-        if (cursor) await sleep(500); // Respect Slack rate limit between pages
+        if (cursor) await sleep(500); 
 
       } catch (err) {
         if (retryCount < maxRetries) {
@@ -178,28 +165,21 @@ app.get("/read-slack", async (req, res) => {
 
     console.log(`\n📦 Total Slack messages fetched: ${allMessages.length} across ${pageCount} page(s)`);
 
-    // ── Parse and validate each Slack message block ──
     const allPosts     = [];
     let   blocksValid  = 0;
     let   blocksDiscard = 0;
 
     for (const msg of allMessages) {
-      // No text → discard
       if (!msg.text) {
         blocksDiscard++;
         continue;
       }
-
       const posts = parseAndValidateBlock(msg.text);
-
       if (!posts) {
-        // Not a valid JSON array of post objects — discard entire block
         blocksDiscard++;
         console.log(`  ⛔ Discarded block (not a valid post array)`);
         continue;
       }
-
-      // Valid block — normalize and collect all posts
       blocksValid++;
       for (const post of posts) {
         allPosts.push(normalizePost(post));
@@ -220,7 +200,6 @@ app.get("/read-slack", async (req, res) => {
       });
     }
 
-    // ── Upsert to MongoDB in batches of 500 ──
     const batchSize = 500;
     let   upserted  = 0;
     let   modified  = 0;
@@ -297,6 +276,30 @@ app.post("/store-posts", async (req, res) => {
     console.error("Error during bulkWrite:", err);
     res.status(500).json({ success: false, error: "Error storing posts to database" });
   }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// 🚀 EVENT-DRIVEN AUTOMATION (PHASE 1)
+// ═══════════════════════════════════════════════════════════════
+// This cron job runs every night exactly at Midnight (0 0 * * *)
+cron.schedule('0 0 * * *', async () => {
+    console.log("\n⏰ Midnight Automation: Starting Slack Scrape...");
+    
+    try {
+        const port = process.env.PORT || 5050;
+        
+        // 1. Automatically hit your own scrape endpoint
+        await axios.get(`http://127.0.0.1:${port}/read-slack`);
+        console.log("✅ Slack Scrape Complete & Saved to MongoDB.");
+
+        // 2. Fire the missile to wake up Python!
+        console.log("🚀 Triggering Python ML Pipeline...");
+        await axios.post('http://127.0.0.1:8000/api/trigger-pipeline');
+        console.log("✅ Python Pipeline triggered successfully. Check FastAPI terminal for logs.");
+        
+    } catch (error) {
+        console.error("❌ Automation Error:", error.message);
+    }
 });
 
 process.on("SIGINT", async () => {
