@@ -7,7 +7,7 @@ export default function BrandPulseDashboard() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   
-  // Filters State - Defaulted to Flipkart since "All Brands" is removed
+  // Filters State
   const [brand, setBrand] = useState("Flipkart");
   const [dateRange, setDateRange] = useState("30"); 
   const [customStart, setCustomStart] = useState("");
@@ -30,16 +30,7 @@ export default function BrandPulseDashboard() {
     fetch(url)
       .then(res => res.json())
       .then(apiData => {
-        // MOCK TRENDING TOPICS 
-        apiData.trending_topics = [
-          { topic: "Customer Service", mentions: 840, sentiment: "Negative" },
-          { topic: "Big Billion Days", mentions: 620, sentiment: "Positive" },
-          { topic: "Delivery Delays", mentions: 415, sentiment: "Negative" },
-          { topic: "Refund Process", mentions: 390, sentiment: "Neutral" },
-          { topic: "Product Quality", mentions: 310, sentiment: "Positive" },
-          { topic: "App Crash", mentions: 205, sentiment: "Negative" },
-          { topic: "Exchange Offers", mentions: 180, sentiment: "Positive" }
-        ];
+        // Data is now 100% dynamic from the backend
         setData(apiData);
         setLoading(false);
       })
@@ -101,6 +92,9 @@ export default function BrandPulseDashboard() {
               <option value="Meesho">Meesho</option>
               <option value="Myntra">Myntra</option>
               <option value="Nykaa">Nykaa</option>
+              <option value="Tira">Tira</option>
+              <option value="Ajio">Ajio</option>
+              <option value="Tata Cliq">Tata Cliq</option>
             </select>
             
             <select 
@@ -199,16 +193,20 @@ export default function BrandPulseDashboard() {
                 <div className="bg-white rounded-xl shadow-sm border border-slate-200 flex flex-col h-[350px]">
                   <div className="p-4 border-b border-slate-100 bg-slate-50 rounded-t-xl font-semibold">Sentiment Trend</div>
                   <div className="p-4 flex-1 w-full h-full pb-8">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={data.trend_data}>
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                        <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} dy={10} />
-                        <YAxis axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} dx={-10} />
-                        <Tooltip />
-                        <Line type="monotone" dataKey="positive" stroke="#16a34a" strokeWidth={3} dot={false} />
-                        <Line type="monotone" dataKey="negative" stroke="#dc2626" strokeWidth={3} dot={false} />
-                      </LineChart>
-                    </ResponsiveContainer>
+                    {data.trend_data.length === 0 ? (
+                      <p className="text-sm text-slate-500 text-center mt-10">Not enough data to map trends.</p>
+                    ) : (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={data.trend_data}>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                          <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} dy={10} />
+                          <YAxis axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} dx={-10} />
+                          <Tooltip />
+                          <Line type="monotone" dataKey="positive" stroke="#16a34a" strokeWidth={3} dot={false} />
+                          <Line type="monotone" dataKey="negative" stroke="#dc2626" strokeWidth={3} dot={false} />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    )}
                   </div>
                 </div>
               </div>
@@ -239,19 +237,23 @@ export default function BrandPulseDashboard() {
                     #trending-carousel::-webkit-scrollbar { display: none; }
                   `}} />
                   
-                  {data.trending_topics.map((item, i) => (
-                    <div key={i} className="min-w-[240px] shrink-0 p-4 rounded-lg border border-slate-100 bg-white shadow-sm flex flex-col gap-2">
-                      <span className="font-bold text-slate-800 truncate">{item.topic}</span>
-                      <div className="flex justify-between items-center text-sm">
-                        <span className="text-slate-500">{item.mentions} mentions</span>
-                        <span className={`px-2 py-1 rounded text-xs font-semibold
-                          ${item.sentiment === 'Positive' ? 'text-green-600 bg-green-50' : 
-                            item.sentiment === 'Negative' ? 'text-red-600 bg-red-50' : 'text-slate-600 bg-slate-50'}`}>
-                          {item.sentiment}
-                        </span>
+                  {data.trending_topics.length === 0 ? (
+                      <p className="text-sm text-slate-500 w-full text-center">No trending keywords found for this filter.</p>
+                  ) : (
+                    data.trending_topics.map((item, i) => (
+                      <div key={i} className="min-w-[240px] shrink-0 p-4 rounded-lg border border-slate-100 bg-white shadow-sm flex flex-col gap-2">
+                        <span className="font-bold text-slate-800 truncate">{item.topic}</span>
+                        <div className="flex justify-between items-center text-sm">
+                          <span className="text-slate-500">{item.mentions} mentions</span>
+                          <span className={`px-2 py-1 rounded text-xs font-semibold
+                            ${item.sentiment === 'Positive' ? 'text-green-600 bg-green-50' : 
+                              item.sentiment === 'Negative' ? 'text-red-600 bg-red-50' : 'text-slate-600 bg-slate-50'}`}>
+                            {item.sentiment}
+                          </span>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    ))
+                  )}
                 </div>
               </div>
             </>

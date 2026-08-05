@@ -1,11 +1,13 @@
 import os
+import json
+import subprocess
 from datetime import datetime, timedelta
-from fastapi import FastAPI, Query
+
+from fastapi import FastAPI, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pymongo import MongoClient
 from dotenv import load_dotenv
 from bson import json_util
-import json
 
 # Load environment variables from your .env file
 load_dotenv()
@@ -26,10 +28,11 @@ client = MongoClient(os.getenv("MONGO_URI"))
 db = client[os.getenv("DB_NAME", "brandpulse")]
 collection = db["preprocessed_reddit_score"]
 
+
 @app.get("/api/dashboard")
 def get_dashboard_metrics(
-    brand: str = "All", 
-    days: int = Query(7, description="Number of days to look back"),
+    brand: str = "Flipkart", 
+    days: int = Query(30, description="Number of days to look back"),
     start_date: str = None, 
     end_date: str = None
 ):
@@ -39,56 +42,101 @@ def get_dashboard_metrics(
     
     # 1. Build the dynamic date query
     date_query = {}
-    
-    # If the user selects a custom date range:
     if start_date and end_date:
-        date_query = {
-            "$gte": start_date,  
-            "$lte": end_date     
-        }
-    # If the user selects a standard dropdown (7 days, 15 days, etc.):
+        date_query = {"$gte": start_date, "$lte": end_date}
     else:
         cutoff_date = (datetime.utcnow() - timedelta(days=days)).isoformat() + "Z"
         date_query = {"$gte": cutoff_date}
 
     # 2. Build the main MongoDB filter
     mongo_filter = {"created_date": date_query}
-    
-    # Add the brand filter if they didn't select "All"
-    if brand != "All":
-        # Searches the brand_mentions array we created in NLP Stage 6
+    if brand.lower() != "all":
         mongo_filter["brand_mentions"] = brand.lower()
 
-    # 3. Fetch the dynamically filtered data!
+    # 3. KPI Calculations
     recent_posts = list(collection.find(mongo_filter, {"_id": 0}).sort("_id", -1).limit(15))
     total_mentions = collection.count_documents(mongo_filter)
     pos_mentions = collection.count_documents({**mongo_filter, "sentiment_label": "Positive"})
     neg_mentions = collection.count_documents({**mongo_filter, "sentiment_label": "Negative"})
     
-    # Calculate percentages safely
     pos_pct = round((pos_mentions / total_mentions) * 100) if total_mentions > 0 else 0
     neg_pct = round((neg_mentions / total_mentions) * 100) if total_mentions > 0 else 0
 
-    # 4. Format the response exactly how the React UI expects it
+    # DYNAMIC: Active Alerts (Triggers based on negative mention volume)
+    active_alerts = neg_mentions
+
+    # 4. DYNAMIC: Sentiment Trend Chart (MongoDB Aggregation)
+    pipeline = [
+        {"$match": mongo_filter},
+        {"$project": {
+            "date": {"$substr": [{"$toString": "$created_date"}, 0, 10]}, # Extracts YYYY-MM-DD
+            "sentiment": "$sentiment_label"
+        }},
+        {"$group": {
+            "_id": "$date",
+            "positive": {"$sum": {"$cond": [{"$eq": ["$sentiment", "Positive"]}, 1, 0]}},
+            "negative": {"$sum": {"$cond": [{"$eq": ["$sentiment", "Negative"]}, 1, 0]}}
+        }},
+        {"$sort": {"_id": 1}} # Sort chronologically
+    ]
+    trend_agg = list(collection.aggregate(pipeline))
+    
+    # Format date as MM-DD for the Recharts UI
+    trend_data = [{"name": item["_id"][-5:], "positive": item["positive"], "negative": item["negative"]} for item in trend_agg]
+
+    # 5. DYNAMIC: Trending Topics Extraction
+    topic_keywords = ["delivery", "refund", "quality", "service", "price", "scam", "return", "discount", "app", "fake", "offer"]
+    trending_topics = []
+    
+    for kw in topic_keywords:
+        kw_filter = {**mongo_filter, "normalized_text": {"$regex": kw, "$options": "i"}}
+        kw_count = collection.count_documents(kw_filter)
+        
+        if kw_count > 0:
+            pos = collection.count_documents({**kw_filter, "sentiment_label": "Positive"})
+            neg = collection.count_documents({**kw_filter, "sentiment_label": "Negative"})
+            
+            # Determine majority sentiment for the topic
+            sentiment = "Neutral"
+            if pos > neg: sentiment = "Positive"
+            elif neg > pos: sentiment = "Negative"
+            
+            trending_topics.append({
+                "topic": kw.capitalize(),
+                "mentions": kw_count,
+                "sentiment": sentiment
+            })
+            
+    # Sort topics by highest mentions and grab the top 10
+    trending_topics = sorted(trending_topics, key=lambda x: x["mentions"], reverse=True)[:10]
+
+    # 6. Format the response
     response_data = {
         "kpis": {
             "total_mentions": total_mentions,
             "positive_pct": pos_pct,
             "negative_pct": neg_pct,
-            "active_alerts": 2 # Placeholder for future alerting logic
+            "active_alerts": active_alerts 
         },
         "live_feed": recent_posts,
-        # Mock trend data for the chart (can be updated to dynamic aggregation later)
-        "trend_data": [
-            {"name": "Mon", "positive": 40, "negative": 24},
-            {"name": "Tue", "positive": 30, "negative": 13},
-            {"name": "Wed", "positive": 20, "negative": 58},
-            {"name": "Thu", "positive": 27, "negative": 39},
-            {"name": "Fri", "positive": 18, "negative": 48},
-            {"name": "Sat", "positive": 23, "negative": 38},
-            {"name": "Sun", "positive": 34, "negative": 43},
-        ]
+        "trend_data": trend_data,
+        "trending_topics": trending_topics
     }
     
     # Safely parse BSON to standard JSON
     return json.loads(json_util.dumps(response_data))
+
+
+@app.post("/api/trigger-pipeline")
+async def trigger_pipeline(background_tasks: BackgroundTasks):
+    def run_scripts():
+        print("🚀 [Trigger] Starting NLP Pipeline...")
+        subprocess.run(["python", "-m", "processing.run_pipeline"], check=True)
+
+        print("🧠 [Trigger] Starting Machine Learning Score...")
+        subprocess.run(["python", "-m", "processing.ml_analyzer"], check=True)
+
+        print("✅ [Trigger] All pipelines complete! Dashboard is updated.")
+
+    background_tasks.add_task(run_scripts)
+    return {"message": "BrandPulse pipeline triggered in the background!"}
