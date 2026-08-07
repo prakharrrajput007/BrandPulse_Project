@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import subprocess
 from datetime import datetime, timedelta
@@ -17,7 +18,7 @@ app = FastAPI(title="BrandPulse API")
 # IMPORTANT: Configure CORS so your Next.js UI (Port 3000) can talk to this API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"], 
+    allow_origins=["http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -31,15 +32,15 @@ collection = db["preprocessed_reddit_score"]
 
 @app.get("/api/dashboard")
 def get_dashboard_metrics(
-    brand: str = "Flipkart", 
-    days: int = Query(30, description="Number of days to look back"),
-    start_date: str = None, 
-    end_date: str = None
+        brand: str = "Flipkart",
+        days: int = Query(30, description="Number of days to look back"),
+        start_date: str = None,
+        end_date: str = None
 ):
     """
     Dynamically filters MongoDB based on the exact date range and brand selected in the UI.
     """
-    
+
     # 1. Build the dynamic date query
     date_query = {}
     if start_date and end_date:
@@ -58,7 +59,7 @@ def get_dashboard_metrics(
     total_mentions = collection.count_documents(mongo_filter)
     pos_mentions = collection.count_documents({**mongo_filter, "sentiment_label": "Positive"})
     neg_mentions = collection.count_documents({**mongo_filter, "sentiment_label": "Negative"})
-    
+
     pos_pct = round((pos_mentions / total_mentions) * 100) if total_mentions > 0 else 0
     neg_pct = round((neg_mentions / total_mentions) * 100) if total_mentions > 0 else 0
 
@@ -69,7 +70,7 @@ def get_dashboard_metrics(
     pipeline = [
         {"$match": mongo_filter},
         {"$project": {
-            "date": {"$substr": [{"$toString": "$created_date"}, 0, 10]}, # Extracts YYYY-MM-DD
+            "date": {"$substr": [{"$toString": "$created_date"}, 0, 10]},  # Extracts YYYY-MM-DD
             "sentiment": "$sentiment_label"
         }},
         {"$group": {
@@ -77,36 +78,40 @@ def get_dashboard_metrics(
             "positive": {"$sum": {"$cond": [{"$eq": ["$sentiment", "Positive"]}, 1, 0]}},
             "negative": {"$sum": {"$cond": [{"$eq": ["$sentiment", "Negative"]}, 1, 0]}}
         }},
-        {"$sort": {"_id": 1}} # Sort chronologically
+        {"$sort": {"_id": 1}}  # Sort chronologically
     ]
     trend_agg = list(collection.aggregate(pipeline))
-    
+
     # Format date as MM-DD for the Recharts UI
-    trend_data = [{"name": item["_id"][-5:], "positive": item["positive"], "negative": item["negative"]} for item in trend_agg]
+    trend_data = [{"name": item["_id"][-5:], "positive": item["positive"], "negative": item["negative"]} for item in
+                  trend_agg]
 
     # 5. DYNAMIC: Trending Topics Extraction
-    topic_keywords = ["delivery", "refund", "quality", "service", "price", "scam", "return", "discount", "app", "fake", "offer"]
+    topic_keywords = ["delivery", "refund", "quality", "service", "price", "scam", "return", "discount", "app", "fake",
+                      "offer"]
     trending_topics = []
-    
+
     for kw in topic_keywords:
         kw_filter = {**mongo_filter, "normalized_text": {"$regex": kw, "$options": "i"}}
         kw_count = collection.count_documents(kw_filter)
-        
+
         if kw_count > 0:
             pos = collection.count_documents({**kw_filter, "sentiment_label": "Positive"})
             neg = collection.count_documents({**kw_filter, "sentiment_label": "Negative"})
-            
+
             # Determine majority sentiment for the topic
             sentiment = "Neutral"
-            if pos > neg: sentiment = "Positive"
-            elif neg > pos: sentiment = "Negative"
-            
+            if pos > neg:
+                sentiment = "Positive"
+            elif neg > pos:
+                sentiment = "Negative"
+
             trending_topics.append({
                 "topic": kw.capitalize(),
                 "mentions": kw_count,
                 "sentiment": sentiment
             })
-            
+
     # Sort topics by highest mentions and grab the top 10
     trending_topics = sorted(trending_topics, key=lambda x: x["mentions"], reverse=True)[:10]
 
@@ -116,13 +121,13 @@ def get_dashboard_metrics(
             "total_mentions": total_mentions,
             "positive_pct": pos_pct,
             "negative_pct": neg_pct,
-            "active_alerts": active_alerts 
+            "active_alerts": active_alerts
         },
         "live_feed": recent_posts,
         "trend_data": trend_data,
         "trending_topics": trending_topics
     }
-    
+
     # Safely parse BSON to standard JSON
     return json.loads(json_util.dumps(response_data))
 
@@ -131,10 +136,11 @@ def get_dashboard_metrics(
 async def trigger_pipeline(background_tasks: BackgroundTasks):
     def run_scripts():
         print("🚀 [Trigger] Starting NLP Pipeline...")
-        subprocess.run(["python", "-m", "processing.run_pipeline"], check=True)
+        # sys.executable makes this completely cross-platform!
+        subprocess.run([sys.executable, "-m", "processing.run_pipeline"], check=True)
 
         print("🧠 [Trigger] Starting Machine Learning Score...")
-        subprocess.run(["python", "-m", "processing.ml_analyzer"], check=True)
+        subprocess.run([sys.executable, "-m", "processing.ml_analyzer"], check=True)
 
         print("✅ [Trigger] All pipelines complete! Dashboard is updated.")
 
