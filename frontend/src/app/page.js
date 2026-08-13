@@ -27,7 +27,7 @@ export default function BrandPulseDashboard() {
     // Reset pagination when filters change
     setDisplayLimit(20); 
     
-    let url = `http://127.0.0.1:8000/api/dashboard?brand=${brand}`;
+   let url = `${process.env.NEXT_PUBLIC_API_URL}/api/dashboard?brand=${brand}`;
     if (dateRange === "custom" && customStart && customEnd) {
       url += `&start_date=${customStart}T00:00:00Z&end_date=${customEnd}T23:59:59Z`;
     } else if (dateRange !== "custom") {
