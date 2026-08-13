@@ -15,10 +15,13 @@ load_dotenv()
 
 app = FastAPI(title="BrandPulse API")
 
-# IMPORTANT: Configure CORS so your Next.js UI (Port 3000) can talk to this API
+# IMPORTANT: Configure CORS so your Next.js UI can talk to this API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "https://brand-pulse-project.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -57,7 +60,7 @@ def get_dashboard_metrics(
     # 3. KPI Calculations & Data Feeds
     # Bump to 300 so the frontend has a deep pool to search for Trending Topics
     recent_posts = list(collection.find(mongo_filter, {"_id": 0}).sort("created_date", -1).limit(300))
-    
+
     # Fetch a dedicated list of 100 Negative posts specifically for the Alerts Tab
     alerts_feed = list(collection.find({**mongo_filter, "sentiment_label": "Negative"}, {"_id": 0}).sort("created_date", -1).limit(100))
 
