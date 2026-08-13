@@ -54,8 +54,13 @@ def get_dashboard_metrics(
     if brand.lower() != "all":
         mongo_filter["brand_mentions"] = brand.lower()
 
-    # 3. KPI Calculations
-    recent_posts = list(collection.find(mongo_filter, {"_id": 0}).sort("_id", -1).limit(15))
+    # 3. KPI Calculations & Data Feeds
+    # Bump to 300 so the frontend has a deep pool to search for Trending Topics
+    recent_posts = list(collection.find(mongo_filter, {"_id": 0}).sort("created_date", -1).limit(300))
+    
+    # Fetch a dedicated list of 100 Negative posts specifically for the Alerts Tab
+    alerts_feed = list(collection.find({**mongo_filter, "sentiment_label": "Negative"}, {"_id": 0}).sort("created_date", -1).limit(100))
+
     total_mentions = collection.count_documents(mongo_filter)
     pos_mentions = collection.count_documents({**mongo_filter, "sentiment_label": "Positive"})
     neg_mentions = collection.count_documents({**mongo_filter, "sentiment_label": "Negative"})
@@ -112,8 +117,8 @@ def get_dashboard_metrics(
                 "sentiment": sentiment
             })
 
-    # Sort topics by highest mentions and grab the top 10
-    trending_topics = sorted(trending_topics, key=lambda x: x["mentions"], reverse=True)[:10]
+    # Sort topics by highest mentions and grab the top 100
+    trending_topics = sorted(trending_topics, key=lambda x: x["mentions"], reverse=True)[:100]
 
     # 6. Format the response
     response_data = {
@@ -124,6 +129,7 @@ def get_dashboard_metrics(
             "active_alerts": active_alerts
         },
         "live_feed": recent_posts,
+        "alerts_feed": alerts_feed,
         "trend_data": trend_data,
         "trending_topics": trending_topics
     }
