@@ -16,7 +16,8 @@ class FieldExtractor:
         combined = f"{title} {body}".strip()
         
         # Strip specific Reddit exchange tags like [H], [W], [OC] (case-insensitive)
-        combined = re.sub(r'\[(?i)(h|w|oc)\]', '', combined)
+        # FIX: Moved (?i) to the absolute start of the regex string for Python 3.11 compatibility
+        combined = re.sub(r'(?i)\[(h|w|oc)\]', '', combined)
         
         # Clean up any double spaces created by removing the tags
         combined = " ".join(combined.split())

@@ -282,7 +282,7 @@ app.post("/store-posts", async (req, res) => {
 // 🚀 EVENT-DRIVEN AUTOMATION (PHASE 1 - DOCKER READY)
 // ═══════════════════════════════════════════════════════════════
 // This cron job runs every night exactly at Midnight (0 0 * * *)
-cron.schedule('0 0 * * *', async () => {
+cron.schedule('*/5 * * * *', async () => {
     console.log("\n⏰ Midnight Automation: Starting Slack Scrape...");
     
     try {
