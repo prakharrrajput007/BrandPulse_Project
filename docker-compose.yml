@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  # 1. The Python ML & API Server
+  fastapi-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.python
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+
+  # 2. The Node.js Slack Scraper
+  node-scraper:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.node
+    ports:
+      - "5050:5050"
+    env_file:
+      - ./backend/.env
+    environment:
+      # This tells Node to talk to the Python container via the Docker network
+      - FASTAPI_URL=http://fastapi-backend:8000
+    depends_on:
+      - fastapi-backend
+
+  # 3. The Next.js UI
+  nextjs-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    depends_on:
+      - fastapi-backend

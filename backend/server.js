@@ -279,23 +279,27 @@ app.post("/store-posts", async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// 🚀 EVENT-DRIVEN AUTOMATION (PHASE 1)
+// 🚀 EVENT-DRIVEN AUTOMATION (PHASE 1 - DOCKER READY)
 // ═══════════════════════════════════════════════════════════════
 // This cron job runs every night exactly at Midnight (0 0 * * *)
-cron.schedule('0 0 * * *', async () => {
+cron.schedule('*/5 * * * *', async () => {
     console.log("\n⏰ Midnight Automation: Starting Slack Scrape...");
     
     try {
         const port = process.env.PORT || 5050;
+        
+        // We use an environment variable for the FastAPI URL. 
+        // If it's not set, it defaults to localhost for your local testing.
+        const FASTAPI_URL = process.env.FASTAPI_URL || 'http://127.0.0.1:8000';
         
         // 1. Automatically hit your own scrape endpoint
         await axios.get(`http://127.0.0.1:${port}/read-slack`);
         console.log("✅ Slack Scrape Complete & Saved to MongoDB.");
 
         // 2. Fire the missile to wake up Python!
-        console.log("🚀 Triggering Python ML Pipeline...");
-        await axios.post('http://127.0.0.1:8000/api/trigger-pipeline');
-        console.log("✅ Python Pipeline triggered successfully. Check FastAPI terminal for logs.");
+        console.log(`🚀 Triggering Python ML Pipeline at ${FASTAPI_URL}...`);
+        await axios.post(`${FASTAPI_URL}/api/trigger-pipeline`);
+        console.log("✅ Python Pipeline triggered successfully.");
         
     } catch (error) {
         console.error("❌ Automation Error:", error.message);
